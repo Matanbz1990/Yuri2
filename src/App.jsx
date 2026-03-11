@@ -1,103 +1,13 @@
 import { useState, useEffect, useRef, useCallback, memo } from "react";
+import { firebaseEnabled, fbSignIn, fbSignOut, fbOnAuth, fbLoadHistory, fbSaveHistory } from "./firebase.js";
+import { callAI, aiEnabled } from "./ai.js";
 
-/*
- ╔══════════════════════════════════════════════════════════════╗
- ║  יורי — עוזר הוראה AI למורים בישראל                        ║
- ║                                                              ║
- ║  SETUP:                                                      ║
- ║  1. cp .env.example .env                                     ║
- ║  2. Fill your keys in .env                                   ║
- ║  3. npm run dev                                              ║
- ╚══════════════════════════════════════════════════════════════╝
-*/
-
-// ─── CONFIGURATION ─────────────────────────────────────────
-// Reads from .env file (Vite: VITE_ prefix)
-// Fallback: paste keys directly below if not using .env
-const _env = (k, fallback="") => {
-  try { return import.meta.env?.[k] || fallback; } catch(e) { return fallback; }
-};
-
-const FIREBASE_CONFIG = {
-  apiKey: _env("VITE_FIREBASE_API_KEY"),
-  authDomain: _env("VITE_FIREBASE_AUTH_DOMAIN"),
-  projectId: _env("VITE_FIREBASE_PROJECT_ID"),
-  storageBucket: _env("VITE_FIREBASE_STORAGE_BUCKET"),
-  messagingSenderId: _env("VITE_FIREBASE_MESSAGING_SENDER_ID"),
-  appId: _env("VITE_FIREBASE_APP_ID"),
-};
-const GEMINI_KEY = _env("VITE_GEMINI_KEY");
-// ────────────────────────────────────────────────────────────
-
-const ANTHROPIC_API = "https://api.anthropic.com/v1/messages";
-const GEMINI_API = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent";
-const useGemini = () => GEMINI_KEY.length > 5;
-const useFirebase = () => FIREBASE_CONFIG.apiKey.length > 5;
-
-// ─── Firebase loader ───────────────────────────────────────
-let fb = null;
-async function loadFirebase() {
-  if (fb) return fb;
-  if (!useFirebase()) return null;
-  try {
-    const [appMod, authMod, fsMod] = await Promise.all([
-      import("https://www.gstatic.com/firebasejs/11.0.1/firebase-app.js"),
-      import("https://www.gstatic.com/firebasejs/11.0.1/firebase-auth.js"),
-      import("https://www.gstatic.com/firebasejs/11.0.1/firebase-firestore.js"),
-    ]);
-    const app = appMod.initializeApp(FIREBASE_CONFIG);
-    const auth = authMod.getAuth(app);
-    const db = fsMod.getFirestore(app);
-    const provider = new authMod.GoogleAuthProvider();
-    fb = { auth, db, provider, authMod, fsMod };
-    return fb;
-  } catch (e) { console.error("Firebase load error:", e); return null; }
-}
-
-// ─── AI caller ─────────────────────────────────────────────
-async function callAI(sys, messages, signal) {
-  if (useGemini()) {
-    const parts = messages.map(m => ({
-      role: m.role === "assistant" ? "model" : "user",
-      parts: typeof m.content === "string" ? [{text:m.content}] :
-        Array.isArray(m.content) ? m.content.map(p => p.type === "text" ? {text:p.text} : p.source ? {inline_data:{mime_type:p.source.media_type,data:p.source.data}} : {text:JSON.stringify(p)}) : [{text:String(m.content)}]
-    }));
-    const res = await fetch(GEMINI_API + "?key=" + GEMINI_KEY, {method:"POST",signal,headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({system_instruction:{parts:[{text:sys}]},contents:parts,generationConfig:{maxOutputTokens:8192,temperature:0.7}})});
-    const data = await res.json();
-    if (data.error) throw new Error(data.error.message);
-    return data.candidates?.[0]?.content?.parts?.map(p => p.text).join("") || "לא התקבלה תשובה.";
-  } else {
-    const apiMsgs = messages.map(m => ({role:m.role,content:m.content}));
-    const hasUrl = messages.some(m => typeof m.content === "string" && /https?:\/\/\S+/.test(m.content));
-    const body = {model:"claude-sonnet-4-20250514",max_tokens:4096,system:sys,messages:apiMsgs};
-    if (hasUrl) body.tools = [{type:"web_search_20250305",name:"web_search"}];
-    let res = await fetch(ANTHROPIC_API,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body),signal});
-    let data = await res.json();
-    if (data.error) throw new Error(data.error.message);
-    let allText = [], turnMsgs = [...apiMsgs], turns = 5;
-    while (turns-- > 0) {
-      allText.push(...(data.content||[]).filter(b => b.type==="text").map(b => b.text));
-      if (data.stop_reason === "end_turn" || !data.content?.some(b => b.type === "tool_use")) break;
-      turnMsgs.push({role:"assistant",content:data.content});
-      turnMsgs.push({role:"user",content:data.content.filter(b => b.type==="tool_use").map(b => ({type:"tool_result",tool_use_id:b.id,content:""}))});
-      const b2 = {model:"claude-sonnet-4-20250514",max_tokens:4096,system:sys,messages:turnMsgs};
-      if (hasUrl) b2.tools = [{type:"web_search_20250305",name:"web_search"}];
-      res = await fetch(ANTHROPIC_API,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(b2),signal});
-      data = await res.json();
-      if (data.error) { allText.push("⚠️ "+data.error.message); break; }
-    }
-    return allText.join("\n\n").trim() || "לא התקבלה תשובה.";
-  }
-}
-
-// ─── Theme ─────────────────────────────────────────────────
 const T = {bg:"#F4F6FB",card:"#FFF",accent:"#4F6BED",accentDk:"#3B50C9",accentLt:"#6C83F2",accentBg:"#EEF0FF",green:"#16A34A",greenBg:"#ECFDF5",orange:"#EA580C",orangeBg:"#FFF7ED",rose:"#E11D48",roseBg:"#FFF1F2",tx:"#1E293B",tx2:"#475569",tx3:"#64748B",tx4:"#94A3B8",brd:"#E2E8F0",sh:"0 1px 3px rgba(0,0,0,0.05)"};
 const ACCEPT = ".pdf,.doc,.docx,.txt,.pptx,.xlsx,.jpg,.jpeg,.png,.rtf,.odt,.csv";
 const TOOLS = [
   {id:"lesson",label:"בניית שיעור",color:T.accent,bg:T.accentBg,emoji:"📖",desc:"תכנון מערך שיעור מלא",sys:"אתה יורי, עוזר הוראה מומחה למורים בישראל. צור מערך שיעור מפורט: נושא ושכבת גיל, יעדי למידה, רקע, פתיחה (5-7 דק), גוף עם 2-3 פעילויות (30 דק), סיכום (8 דק), התאמות, חומרי עזר. כתוב בעברית.",ph:"לדוגמה: שיעור מתמטיקה כיתה ד׳..."},
   {id:"exam",label:"יצירת עבודה / מבחן",color:T.green,bg:T.greenBg,emoji:"📝",desc:"מבחן מותאם עם מפתח תשובות",sys:"אתה יורי, עוזר הוראה מומחה למורים בישראל. צור מבחן מקצועי: כותרת, מקצוע, שכבת גיל, שאלות מגוונות ברמות קושי, מפתח תשובות עם ניקוד. כתוב בעברית.",ph:"לדוגמה: מבחן מדעים כיתה ה׳..."},
-  {id:"text2exam",label:"מטקסט למבחן",color:T.orange,bg:T.orangeBg,emoji:"🔬",desc:"העלה קובץ / טקסט / קישור → מבחן",sys:"אתה יורי, עוזר הוראה מומחה. אל תציג את עצמך. התחל ישירות במבחן. צור מבחן מבוסס אך ורק על החומר שסופק. 8-12 שאלות מגוונות, מפתח תשובות עם ניקוד. אל תוסיף שאלות על חומר שלא מופיע במקור. כתוב בעברית.",ph:"הדבק טקסט, קישור, או צרף קובץ..."},
+  {id:"text2exam",label:"מטקסט למבחן",color:T.orange,bg:T.orangeBg,emoji:"🔬",desc:"העלה קובץ / טקסט / קישור → מבחן",sys:"אתה יורי, עוזר הוראה מומחה. אל תציג את עצמך. התחל ישירות במבחן. צור מבחן מבוסס אך ורק על החומר שסופק. 8-12 שאלות מגוונות, מפתח תשובות עם ניקוד. אל תוסיף שאלות על חומר שלא במקור. כתוב בעברית.",ph:"הדבק טקסט, קישור, או צרף קובץ..."},
 ];
 
 // ─── Avatars ───────────────────────────────────────────────
@@ -130,8 +40,8 @@ function Editor({text, onClose}){
   const toggle = i => setSel(p => { const n=new Set(p); n.has(i)?n.delete(i):n.add(i); return n; });
   const getText = () => sel.size===0 ? content : secs.filter((_,i) => sel.has(i)).join("\n\n");
   const toHtml = t => { let h=t.replace(/\*\*(.+?)\*\*/g,'<strong>$1</strong>').replace(/\*(.+?)\*/g,'<em>$1</em>').replace(/^[-•]\s(.+)$/gm,'<li>$1</li>').replace(/\n{2,}/g,'<br/><br/>').replace(/\n/g,'<br/>'); return '<html dir="rtl"><head><meta charset="utf-8"><style>body{font-family:David,Arial,sans-serif;padding:30px 40px;color:#1e293b;line-height:1.8;font-size:14px;direction:rtl}ul{padding-right:24px}</style></head><body><div style="text-align:center;margin-bottom:20px;border-bottom:2px solid #4F6BED;padding-bottom:14px"><b style="font-size:20px;color:#4F6BED">🎓 יורי</b></div>'+h+'</body></html>'; };
-  const expWord = () => { const html='\ufeff'+toHtml(getText()); const b=new Blob([html],{type:"application/msword;charset=utf-8"}); const u=URL.createObjectURL(b); const a=document.createElement("a"); a.href=u; a.download="yuri.doc"; document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(u); };
-  const expPdf = () => { const html=toHtml(getText()); const b=new Blob([html],{type:"text/html;charset=utf-8"}); const u=URL.createObjectURL(b); const w=window.open(u,"_blank"); if(!w){const a=document.createElement("a");a.href=u;a.download="yuri.html";document.body.appendChild(a);a.click();document.body.removeChild(a);} setTimeout(()=>URL.revokeObjectURL(u),5000); };
+  const expWord = () => { const b=new Blob(['\ufeff'+toHtml(getText())],{type:"application/msword;charset=utf-8"}); const u=URL.createObjectURL(b); const a=document.createElement("a"); a.href=u; a.download="yuri.doc"; document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(u); };
+  const expPdf = () => { const b=new Blob([toHtml(getText())],{type:"text/html;charset=utf-8"}); const u=URL.createObjectURL(b); const w=window.open(u,"_blank"); if(!w){const a=document.createElement("a");a.href=u;a.download="yuri.html";document.body.appendChild(a);a.click();document.body.removeChild(a);} setTimeout(()=>URL.revokeObjectURL(u),5000); };
   return (
     <div style={{position:"fixed",inset:0,zIndex:200,display:"flex",alignItems:"center",justifyContent:"center"}}>
       <div onClick={onClose} style={{position:"absolute",inset:0,background:"rgba(0,0,0,0.3)",backdropFilter:"blur(4px)"}}/>
@@ -158,7 +68,7 @@ function Editor({text, onClose}){
   );
 }
 
-// ─── Message ───────────────────────────────────────────────
+// ─── Sub-components ────────────────────────────────────────
 const Msg = memo(function Msg({msg, onEdit}){
   const u = msg.role==="user";
   return (
@@ -166,13 +76,13 @@ const Msg = memo(function Msg({msg, onEdit}){
       {!u && <div style={{marginTop:"4px",flexShrink:0}}><YuriSm/></div>}
       <div style={{maxWidth:u?"70%":"80%",background:u?"linear-gradient(135deg,"+T.accent+","+T.accentDk+")":T.card,borderRadius:u?"18px 18px 4px 18px":"18px 18px 18px 4px",padding:u?"12px 18px":"16px 20px",border:u?"none":"1px solid "+T.brd,boxShadow:u?"0 3px 12px rgba(79,107,237,0.2)":T.sh}}>
         {u ? <p style={{color:"#fff",lineHeight:1.7,fontSize:"14.5px",whiteSpace:"pre-wrap"}}>{msg.content}</p>
-        : <div><Content text={msg.content}/>{msg.content.length > 120 && <div style={{display:"flex",justifyContent:"flex-end",marginTop:"10px"}}><button onClick={() => onEdit(msg.content)} style={{background:T.accentBg,border:"1px solid "+T.accent+"25",borderRadius:"8px",padding:"4px 10px",color:T.accent,cursor:"pointer",fontSize:"12px"}}>✏️ עריכה וייצוא</button></div>}</div>}
+        : <div><Content text={msg.content}/>{msg.content.length>120 && <div style={{display:"flex",justifyContent:"flex-end",marginTop:"10px"}}><button onClick={() => onEdit(msg.content)} style={{background:T.accentBg,border:"1px solid "+T.accent+"25",borderRadius:"8px",padding:"4px 10px",color:T.accent,cursor:"pointer",fontSize:"12px"}}>✏️ עריכה וייצוא</button></div>}</div>}
       </div>
     </div>
   );
 });
 
-function Dots(){ return <div style={{display:"flex",alignItems:"center",gap:"10px",padding:"12px 0"}}><div style={{flexShrink:0,animation:"pulse 1.5s ease infinite"}}><YuriSm/></div><div style={{background:T.card,borderRadius:"16px 16px 4px 16px",padding:"12px 18px",border:"1px solid "+T.brd,display:"flex",gap:"8px",alignItems:"center"}}><span style={{color:T.tx4,fontSize:"13px"}}>יורי חושב...</span></div></div>; }
+function Dots(){ return <div style={{display:"flex",alignItems:"center",gap:"10px",padding:"12px 0"}}><div style={{flexShrink:0}}><YuriSm/></div><div style={{background:T.card,borderRadius:"16px 16px 4px 16px",padding:"12px 18px",border:"1px solid "+T.brd,display:"flex",gap:"8px",alignItems:"center"}}><span style={{color:T.tx4,fontSize:"13px"}}>יורי חושב...</span></div></div>; }
 
 function DropZone({onFile}){
   const [drag, setDrag] = useState(false); const ref = useRef(null);
@@ -214,7 +124,7 @@ function HistPanel({list, onLoad, onDel, onClose}){
   );
 }
 
-// ═════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════
 export default function App(){
   const [pg, setPg] = useState("home");
   const [tool, setTool] = useState(null);
@@ -227,7 +137,7 @@ export default function App(){
   const [busyLbl, setBusyLbl] = useState("");
   const [editText, setEditText] = useState(null);
   const [user, setUser] = useState(null);
-  const [authLoading, setAuthLoading] = useState(true);
+  const [authReady, setAuthReady] = useState(false);
   const endRef = useRef(null);
   const inpRef = useRef(null);
   const abortRef = useRef(null);
@@ -235,58 +145,22 @@ export default function App(){
   const savedRef = useRef(false);
   R.current = {input,files,msgs,busy,tool};
 
-  // ─── Auth: listen for user ───────────────────────────────
+  // ─── Auth ────────────────────────────────────────────────
   useEffect(() => {
-    if (!useFirebase()) { setAuthLoading(false); return; }
-    (async () => {
-      const f = await loadFirebase();
-      if (!f) { setAuthLoading(false); return; }
-      f.authMod.onAuthStateChanged(f.auth, u => { setUser(u); setAuthLoading(false); });
-    })();
+    const unsub = fbOnAuth(u => { setUser(u); setAuthReady(true); });
+    return unsub;
   }, []);
 
-  const signIn = async () => {
-    const f = await loadFirebase();
-    if (f) await f.authMod.signInWithPopup(f.auth, f.provider);
-  };
-  const signOut = async () => {
-    const f = await loadFirebase();
-    if (f) await f.authMod.signOut(f.auth);
-    setUser(null); setHist([]);
-  };
-
-  // ─── History: load from Firestore or localStorage ────────
+  // ─── Load history ────────────────────────────────────────
   useEffect(() => {
-    if (authLoading) return;
-    (async () => {
-      if (useFirebase() && user) {
-        const f = await loadFirebase();
-        if (f) {
-          try {
-            const docRef = f.fsMod.doc(f.db, "users", user.uid);
-            const snap = await f.fsMod.getDoc(docRef);
-            if (snap.exists()) setHist(snap.data().history || []);
-          } catch(e) { console.error(e); }
-        }
-      } else {
-        try { const r = await window.storage.get("yuri-local-h"); if (r?.value) setHist(JSON.parse(r.value)); } catch(e){}
-      }
-    })();
-  }, [user, authLoading]);
+    if (!authReady) return;
+    if (user) {
+      fbLoadHistory(user.uid).then(h => setHist(h));
+    }
+  }, [user, authReady]);
 
   const saveH = useCallback(async l => {
-    if (useFirebase() && user) {
-      const f = await loadFirebase();
-      if (f) {
-        try {
-          // Save without message content to reduce Firestore size — only keep last 50 previews
-          const lite = l.map(h => ({...h, messages: h.messages?.slice(-10) || []}));
-          await f.fsMod.setDoc(f.fsMod.doc(f.db, "users", user.uid), {history: lite}, {merge:true});
-        } catch(e) { console.error(e); }
-      }
-    } else {
-      try { await window.storage.set("yuri-local-h", JSON.stringify(l)); } catch(e){}
-    }
+    if (user) await fbSaveHistory(user.uid, l);
   }, [user]);
 
   useEffect(() => { endRef.current?.scrollIntoView({behavior:"smooth"}); }, [msgs, busy]);
@@ -314,14 +188,14 @@ export default function App(){
     setMsgs(p=>[...p,{role:"user",content,files:cf.map(f=>({name:f.name}))}]); setBusy(true);
     const at=t||TOOLS[0]; setBusyLbl(at.label);
     let sys=at.sys;
-    if(cf.length)sys+="\n\nהמורה צירף קבצים. קרא אותם ובסס את התשובה על תוכנם.";
+    if(cf.length)sys+="\n\nהמורה צירף קבצים. קרא ובסס את התשובה על תוכנם.";
     if(/youtu\.?be/.test(content))sys+="\nחפש כתוביות/תקציר של סרטון היוטיוב.";
-    else if(/https?:\/\/\S+/.test(content))sys+="\nגש לתוכן הקישור באמצעות חיפוש.";
+    else if(/https?:\/\/\S+/.test(content))sys+="\nגש לתוכן הקישור.";
     const apiMsgs=[...prev,{role:"user",content}].map(m2=>({role:m2.role,content:m2.content}));
     if(cf.length){const last=apiMsgs[apiMsgs.length-1];const parts=[];cf.forEach(f=>{const mt=f.type||"application/octet-stream";parts.push(mt.startsWith("image/")?{type:"image",source:{type:"base64",media_type:mt,data:f.base64}}:{type:"document",source:{type:"base64",media_type:mt,data:f.base64}});});parts.push({type:"text",text:last.content});last.content=parts;}
     const ctrl=new AbortController();abortRef.current=ctrl;const timer=setTimeout(()=>{if(abortRef.current===ctrl)ctrl.abort();},180000);
-    try{const reply=await callAI(sys,apiMsgs,ctrl.signal);setMsgs(p=>[...p,{role:"assistant",content:reply}]);}
-    catch(err){setMsgs(p=>[...p,{role:"assistant",content:err.name==="AbortError"?"⏹ הפעולה הופסקה.":"⚠️ "+err.message}]);}
+    try { const reply = await callAI(sys, apiMsgs, ctrl.signal); setMsgs(p=>[...p,{role:"assistant",content:reply}]); }
+    catch(err) { setMsgs(p=>[...p,{role:"assistant",content:err.name==="AbortError"?"⏹ הפעולה הופסקה.":"⚠️ "+err.message}]); }
     clearTimeout(timer);abortRef.current=null;setBusy(false);setBusyLbl("");
   }, []);
 
@@ -331,45 +205,44 @@ export default function App(){
   const addF=useCallback(f=>setFiles(p=>[...p,f]),[]);
   const rmF=useCallback(i=>setFiles(p=>p.filter((_,x)=>x!==i)),[]);
 
-  const css=`@import url('https://fonts.googleapis.com/css2?family=Heebo:wght@300;400;500;600;700;800;900&display=swap');*{margin:0;padding:0;box-sizing:border-box}html,body{width:100%;min-height:100vh}body{font-family:'Heebo',sans-serif;background:${T.bg};color:${T.tx};direction:rtl;display:flex;justify-content:center}#root{width:100%}::-webkit-scrollbar{width:6px}::-webkit-scrollbar-thumb{background:#CBD5E1;border-radius:3px}textarea:focus,input:focus{outline:none}button{font-family:'Heebo',sans-serif}@keyframes spin{to{transform:rotate(360deg)}}@keyframes pulse{0%,100%{transform:scale(1)}50%{transform:scale(1.05)}}`;
   const histPanel=showH?<HistPanel list={hist} onLoad={h=>{setTool(TOOLS.find(x=>x.id===h.toolId)||TOOLS[0]);setMsgs(h.messages||[]);setPg("chat");}} onDel={i=>{setHist(p=>{const u=p.filter((_,x)=>x!==i);saveH(u);return u;});}} onClose={()=>setShowH(false)}/>:null;
 
-  // ─── Loading / Auth screen ───────────────────────────────
-  if (authLoading) return <><style>{css}</style><div style={{minHeight:"100vh",display:"flex",alignItems:"center",justifyContent:"center"}}><YuriAv s={60}/></div></>;
-
-  if (useFirebase() && !user) return <><style>{css}</style>
-    <div style={{minHeight:"100vh",display:"flex",alignItems:"center",justifyContent:"center"}}>
+  // ─── Login screen ────────────────────────────────────────
+  if (firebaseEnabled && !user && authReady) return (
+    <div style={{minHeight:"100vh",display:"flex",alignItems:"center",justifyContent:"center",background:T.bg,fontFamily:"'Heebo',sans-serif",direction:"rtl"}}>
       <div style={{textAlign:"center",padding:"40px"}}>
         <YuriAv s={100}/>
-        <h1 style={{fontSize:"36px",fontWeight:900,marginTop:"16px"}}>יורי</h1>
+        <h1 style={{fontSize:"36px",fontWeight:900,marginTop:"16px",color:T.tx}}>יורי</h1>
         <p style={{color:T.tx3,marginTop:"6px",marginBottom:"24px"}}>עוזר ההוראה החכם שלך</p>
-        <button onClick={signIn} style={{background:T.card,border:"1px solid "+T.brd,borderRadius:"12px",padding:"12px 28px",fontSize:"16px",fontWeight:600,cursor:"pointer",display:"flex",alignItems:"center",gap:"10px",margin:"0 auto",boxShadow:T.sh}}>
+        <button onClick={fbSignIn} style={{background:T.card,border:"1px solid "+T.brd,borderRadius:"12px",padding:"12px 28px",fontSize:"16px",fontWeight:600,cursor:"pointer",display:"flex",alignItems:"center",gap:"10px",margin:"0 auto",boxShadow:T.sh,fontFamily:"'Heebo',sans-serif"}}>
           <svg width="20" height="20" viewBox="0 0 48 48"><path fill="#FFC107" d="M43.6 20.1H42V20H24v8h11.3C33.9 32.6 29.3 36 24 36c-6.6 0-12-5.4-12-12s5.4-12 12-12c3 0 5.8 1.1 7.9 3l5.7-5.7C34 6 29.3 4 24 4 12.9 4 4 12.9 4 24s8.9 20 20 20 20-8.9 20-20c0-1.3-.1-2.7-.4-3.9z"/><path fill="#FF3D00" d="M6.3 14.7l6.6 4.8C14.4 16 18.8 13 24 13c3 0 5.8 1.1 7.9 3l5.7-5.7C34 6 29.3 4 24 4 16.3 4 9.7 8.3 6.3 14.7z"/><path fill="#4CAF50" d="M24 44c5.2 0 9.9-2 13.4-5.2l-6.2-5.2C29.3 35.2 26.8 36 24 36c-5.2 0-9.6-3.3-11.3-8l-6.5 5C9.5 39.6 16.2 44 24 44z"/><path fill="#1976D2" d="M43.6 20.1H42V20H24v8h11.3c-.8 2.2-2.2 4.1-4.1 5.5l6.2 5.2C37 39.1 44 34 44 24c0-1.3-.1-2.7-.4-3.9z"/></svg>
           התחבר עם Google
         </button>
+        {!aiEnabled() && <p style={{color:T.rose,fontSize:"13px",marginTop:"16px"}}>⚠️ מפתח Gemini חסר — הוסף VITE_GEMINI_KEY ל-.env</p>}
       </div>
     </div>
-  </>;
+  );
+
+  if (!authReady) return <div style={{minHeight:"100vh",display:"flex",alignItems:"center",justifyContent:"center",background:T.bg}}><YuriAv s={60}/></div>;
+
+  const W = {maxW:"960px",pad:"0 20px"};
 
   // ═══ HOME ═══
-  if (pg==="home") return <><style>{css}</style>
-    <div style={{minHeight:"100vh",width:"100%",maxWidth:"960px",margin:"0 auto",padding:"0 20px"}}>
-      <div style={{position:"fixed",inset:0,pointerEvents:"none",background:"radial-gradient(ellipse 80% 50% at 50% -5%,rgba(79,107,237,0.07),transparent 55%)"}}/>
-      <div style={{position:"relative",zIndex:1,maxWidth:"760px",margin:"0 auto",padding:"20px 0 60px"}}>
-        {/* User bar */}
+  if (pg==="home") return (
+    <div style={{minHeight:"100vh",width:"100%",maxWidth:W.maxW,margin:"0 auto",padding:W.pad,fontFamily:"'Heebo',sans-serif",direction:"rtl",background:T.bg}}>
+      <div style={{maxWidth:"760px",margin:"0 auto",padding:"20px 0 60px"}}>
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:"8px"}}>
           {user ? <div style={{display:"flex",alignItems:"center",gap:"8px"}}>
             {user.photoURL && <img src={user.photoURL} style={{width:"28px",height:"28px",borderRadius:"50%"}} referrerPolicy="no-referrer"/>}
             <span style={{fontSize:"13px",color:T.tx3}}>{user.displayName}</span>
-            <button onClick={signOut} style={{background:"none",border:"none",cursor:"pointer",color:T.tx4,fontSize:"12px",textDecoration:"underline"}}>התנתק</button>
+            <button onClick={() => {fbSignOut();setUser(null);setHist([]);}} style={{background:"none",border:"none",cursor:"pointer",color:T.tx4,fontSize:"12px",textDecoration:"underline"}}>התנתק</button>
           </div> : <div/>}
           <button onClick={() => setShowH(true)} style={{background:T.card,border:"1px solid "+T.brd,borderRadius:"12px",padding:"8px 16px",color:T.tx2,cursor:"pointer",display:"flex",alignItems:"center",gap:"6px",fontSize:"13px",boxShadow:T.sh}}>🕐 היסטוריה{hist.length>0&&<span style={{background:T.accent,color:"#fff",borderRadius:"10px",padding:"1px 7px",fontSize:"11px",fontWeight:600}}>{hist.length}</span>}</button>
         </div>
-
-        <header style={{textAlign:"center",padding:"30px 0 36px"}}><div style={{margin:"0 auto 16px"}}><YuriAv s={100}/></div><h1 style={{fontSize:"clamp(36px,6vw,48px)",fontWeight:900,letterSpacing:"-1px"}}>יורי</h1><p style={{fontSize:"18px",color:T.tx3,marginTop:"6px"}}>עוזר ההוראה החכם שלך</p></header>
-        {busy&&<div style={{background:"linear-gradient(135deg,#FEF3C7,#FDE68A)",border:"1px solid #F59E0B40",borderRadius:"14px",padding:"16px 20px",marginBottom:"20px",display:"flex",alignItems:"center",gap:"14px"}}><span style={{fontSize:"22px",animation:"spin 2s linear infinite",display:"inline-block"}}>⏳</span><div style={{flex:1}}><b style={{color:"#92400E"}}>יורי עובד: {busyLbl}</b><p style={{fontSize:"12px",color:"#A16207"}}>ניתן לבצע רק משימה אחת בכל פעם</p></div><button onClick={()=>setPg("chat")} style={{background:"#FEF9C3",border:"1px solid #F59E0B40",borderRadius:"8px",padding:"6px 12px",color:"#92400E",cursor:"pointer",fontSize:"12px",fontWeight:600}}>צפה</button><button onClick={cancelReq} style={{background:"#fff",border:"1px solid "+T.rose+"40",borderRadius:"8px",padding:"6px 12px",color:T.rose,cursor:"pointer",fontSize:"12px",fontWeight:600}}>⏹ עצור</button></div>}
+        <header style={{textAlign:"center",padding:"30px 0 36px"}}><div style={{margin:"0 auto 16px"}}><YuriAv s={100}/></div><h1 style={{fontSize:"clamp(36px,6vw,48px)",fontWeight:900,letterSpacing:"-1px",color:T.tx}}>יורי</h1><p style={{fontSize:"18px",color:T.tx3,marginTop:"6px"}}>עוזר ההוראה החכם שלך</p></header>
+        {busy && <div style={{background:"linear-gradient(135deg,#FEF3C7,#FDE68A)",border:"1px solid #F59E0B40",borderRadius:"14px",padding:"16px 20px",marginBottom:"20px",display:"flex",alignItems:"center",gap:"14px"}}><span style={{fontSize:"22px",display:"inline-block",animation:"spin 2s linear infinite"}}>⏳</span><div style={{flex:1}}><b style={{color:"#92400E"}}>יורי עובד: {busyLbl}</b></div><button onClick={() => setPg("chat")} style={{background:"#FEF9C3",border:"1px solid #F59E0B40",borderRadius:"8px",padding:"6px 12px",color:"#92400E",cursor:"pointer",fontSize:"12px",fontWeight:600}}>צפה</button><button onClick={cancelReq} style={{background:"#fff",border:"1px solid "+T.rose+"40",borderRadius:"8px",padding:"6px 12px",color:T.rose,cursor:"pointer",fontSize:"12px",fontWeight:600}}>⏹ עצור</button></div>}
         <div style={{display:"flex",flexDirection:"column",gap:"14px"}}>
-          {TOOLS.map(t => <button key={t.id} onClick={() => openTool(t)} style={{background:T.card,border:"1px solid "+(t.id==="text2exam"?T.orange+"30":T.brd),borderRadius:"16px",padding:"24px 28px",cursor:"pointer",textAlign:"right",transition:"all 0.25s",boxShadow:T.sh,position:"relative",overflow:"hidden",display:"flex",alignItems:"center",gap:"18px"}} onMouseEnter={e=>{e.currentTarget.style.transform="translateY(-2px)";}} onMouseLeave={e=>{e.currentTarget.style.transform="";}}>
+          {TOOLS.map(t => <button key={t.id} onClick={() => openTool(t)} style={{background:T.card,border:"1px solid "+(t.id==="text2exam"?T.orange+"30":T.brd),borderRadius:"16px",padding:"24px 28px",cursor:"pointer",textAlign:"right",transition:"all 0.2s",boxShadow:T.sh,display:"flex",alignItems:"center",gap:"18px",position:"relative",overflow:"hidden"}}>
             {t.id==="text2exam"&&<div style={{position:"absolute",top:"10px",left:"10px",background:T.orange,color:"#fff",borderRadius:"6px",padding:"2px 8px",fontSize:"10px",fontWeight:700}}>חדש!</div>}
             <div style={{width:"56px",height:"56px",borderRadius:"16px",background:t.bg,display:"flex",alignItems:"center",justifyContent:"center",fontSize:"26px",flexShrink:0}}>{t.emoji}</div>
             <div><div style={{fontSize:"19px",fontWeight:700,marginBottom:"4px"}}>{t.label}</div><p style={{fontSize:"14px",color:T.tx4}}>{t.desc}</p></div>
@@ -380,24 +253,28 @@ export default function App(){
           <a href="mailto:matanbz95@gmail.com" style={{fontSize:"12px",color:T.accent,textDecoration:"none",marginTop:"4px",display:"inline-block"}}>📧 יצירת קשר</a>
         </div>
       </div>
-    </div>{histPanel}</>;
+      {histPanel}
+      <style>{`@import url('https://fonts.googleapis.com/css2?family=Heebo:wght@300;400;500;600;700;800;900&display=swap');@keyframes spin{to{transform:rotate(360deg)}}`}</style>
+    </div>
+  );
 
   // ═══ CHAT ═══
   const isT2E=tool?.id==="text2exam";
-  return <><style>{css}</style>
-    <div style={{display:"flex",flexDirection:"column",height:"100vh",width:"100%",maxWidth:"960px",margin:"0 auto"}}>
+  return (
+    <div style={{display:"flex",flexDirection:"column",height:"100vh",width:"100%",maxWidth:W.maxW,margin:"0 auto",fontFamily:"'Heebo',sans-serif",direction:"rtl",background:T.bg}}>
+      <style>{`@import url('https://fonts.googleapis.com/css2?family=Heebo:wght@300;400;500;600;700;800;900&display=swap');@keyframes spin{to{transform:rotate(360deg)}}`}</style>
       <div style={{position:"sticky",top:0,zIndex:10,background:"rgba(255,255,255,0.9)",backdropFilter:"blur(12px)",borderBottom:"1px solid "+T.brd,padding:"12px 24px",display:"flex",alignItems:"center",gap:"12px"}}>
         <button onClick={openHome} style={{background:T.bg,border:"1px solid "+T.brd,borderRadius:"10px",padding:"7px 9px",color:T.tx3,cursor:"pointer",fontSize:"16px"}}>🏠</button>
-        {tool&&<div style={{display:"flex",alignItems:"center",gap:"9px"}}><div style={{width:"32px",height:"32px",borderRadius:"10px",background:tool.bg,display:"flex",alignItems:"center",justifyContent:"center",fontSize:"16px"}}>{tool.emoji}</div><div><b style={{fontSize:"14.5px"}}>{tool.label}</b><p style={{fontSize:"11px",color:T.tx4}}>יורי</p></div></div>}
-        <div style={{marginRight:"auto",display:"flex",gap:"6px"}}><button onClick={()=>setShowH(true)} style={{background:T.bg,border:"1px solid "+T.brd,borderRadius:"8px",padding:"6px 12px",color:T.tx4,fontSize:"12px",cursor:"pointer"}}>🕐</button><button onClick={()=>{const{msgs:m,tool:ct,busy:b2}=R.current;if(m.length>=2&&!b2)saveCon(ct,m);cancelReq();setMsgs([]);setFiles([]);setInput("");}} style={{background:T.bg,border:"1px solid "+T.brd,borderRadius:"8px",padding:"6px 12px",color:T.tx4,fontSize:"12px",cursor:"pointer"}}>+ חדש</button></div>
+        {tool&&<div style={{display:"flex",alignItems:"center",gap:"9px"}}><div style={{width:"32px",height:"32px",borderRadius:"10px",background:tool.bg,display:"flex",alignItems:"center",justifyContent:"center",fontSize:"16px"}}>{tool.emoji}</div><b style={{fontSize:"14.5px"}}>{tool.label}</b></div>}
+        <div style={{marginRight:"auto",display:"flex",gap:"6px"}}><button onClick={() => setShowH(true)} style={{background:T.bg,border:"1px solid "+T.brd,borderRadius:"8px",padding:"6px 12px",color:T.tx4,fontSize:"12px",cursor:"pointer"}}>🕐</button><button onClick={() => {const{msgs:m,tool:ct,busy:b2}=R.current;if(m.length>=2&&!b2)saveCon(ct,m);cancelReq();setMsgs([]);setFiles([]);setInput("");}} style={{background:T.bg,border:"1px solid "+T.brd,borderRadius:"8px",padding:"6px 12px",color:T.tx4,fontSize:"12px",cursor:"pointer"}}>+ חדש</button></div>
       </div>
-      <div style={{flex:1,overflowY:"auto",padding:"20px 24px",background:T.bg}}>
+      <div style={{flex:1,overflowY:"auto",padding:"20px 24px"}}>
         <div style={{maxWidth:"840px",margin:"0 auto"}}>
           {msgs.length===0&&<div style={{padding:"40px 20px",textAlign:"center"}}>
             <div style={{width:"60px",height:"60px",borderRadius:"18px",margin:"0 auto 18px",background:tool?.bg||T.accentBg,display:"flex",alignItems:"center",justifyContent:"center",fontSize:"28px"}}>{tool?.emoji}</div>
             <h3 style={{fontSize:"19px",fontWeight:700,marginBottom:"6px"}}>{tool?.label}</h3>
             <p style={{color:T.tx4,fontSize:"13.5px",maxWidth:"400px",margin:"0 auto"}}>{tool?.desc}</p>
-            {isT2E&&<div style={{marginTop:"20px",textAlign:"right"}}><DropZone onFile={addF}/><div style={{background:T.card,border:"1px solid "+T.brd,borderRadius:"14px",padding:"18px 22px"}}><b style={{color:T.orange}}>🔬 איך להשתמש?</b><div style={{fontSize:"13px",color:T.tx2,lineHeight:1.9,marginTop:"8px"}}><p>📄 <b>קובץ:</b> גרור PDF / Word / תמונה לריבוע</p><p>📝 <b>טקסט:</b> הדבק בתיבת הכתיבה</p><p>🔗 <b>קישור:</b> ויקיפדיה / אתר לימודי</p><p>🎬 <b>יוטיוב:</b> יורי יחפש כתוביות</p><p style={{color:T.orange,fontWeight:600,marginTop:"8px"}}>💡 המבחן יתבסס רק על החומר שסיפקת</p></div></div></div>}
+            {isT2E&&<div style={{marginTop:"20px",textAlign:"right"}}><DropZone onFile={addF}/><div style={{background:T.card,border:"1px solid "+T.brd,borderRadius:"14px",padding:"18px 22px"}}><b style={{color:T.orange}}>🔬 איך להשתמש?</b><div style={{fontSize:"13px",color:T.tx2,lineHeight:1.9,marginTop:"8px"}}><p>📄 <b>קובץ:</b> גרור PDF / Word / תמונה לריבוע</p><p>📝 <b>טקסט:</b> הדבק בתיבת הכתיבה</p><p>🔗 <b>קישור:</b> ויקיפדיה / אתר</p><p>🎬 <b>יוטיוב:</b> כתוביות/תקציר</p><p style={{color:T.orange,fontWeight:600,marginTop:"8px"}}>💡 המבחן יתבסס רק על החומר שסיפקת</p></div></div></div>}
           </div>}
           {msgs.map((m,i) => <Msg key={i} msg={m} onEdit={setEditText}/>)}
           {busy&&<Dots/>}
@@ -415,8 +292,8 @@ export default function App(){
           </div>
         </div>
       </div>
+      {editText!==null&&<Editor text={editText} onClose={()=>setEditText(null)}/>}
+      {histPanel}
     </div>
-    {editText!==null&&<Editor text={editText} onClose={()=>setEditText(null)}/>}
-    {histPanel}
-  </>;
+  );
 }
