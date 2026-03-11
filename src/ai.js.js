@@ -1,8 +1,9 @@
 const GEMINI_KEY = import.meta.env.VITE_GEMINI_KEY || "";
 
 // משתמשים ב-v1beta כדי לתמוך ב-system_instruction
+
 const GEMINI_API =
-  "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent";
+  "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent";
 
 export function aiEnabled() {
   return GEMINI_KEY.length > 5;
