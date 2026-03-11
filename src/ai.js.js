@@ -1,6 +1,6 @@
 const GEMINI_KEY = import.meta.env.VITE_GEMINI_KEY || "";
-const GEMINI_API = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent";
-
+const GEMINI_API =
+  "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent";
 export function aiEnabled() {
   return GEMINI_KEY.length > 5;
 }
@@ -19,10 +19,15 @@ export async function callAI(systemPrompt, messages, signal) {
     if (typeof m.content === "string") {
       parts = [{ text: m.content }];
     } else if (Array.isArray(m.content)) {
-      parts = m.content.map(p => {
+      parts = m.content.map((p) => {
         if (p.type === "text") return { text: p.text };
         if (p.source?.data) {
-          return { inline_data: { mime_type: p.source.media_type || "application/octet-stream", data: p.source.data } };
+          return {
+            inline_data: {
+              mime_type: p.source.media_type || "application/octet-stream",
+              data: p.source.data,
+            },
+          };
         }
         return { text: JSON.stringify(p) };
       });
@@ -43,8 +48,8 @@ export async function callAI(systemPrompt, messages, signal) {
       generationConfig: {
         maxOutputTokens: 8192,
         temperature: 0.7,
-      }
-    })
+      },
+    }),
   });
 
   const data = await res.json();
@@ -53,7 +58,8 @@ export async function callAI(systemPrompt, messages, signal) {
     throw new Error(data.error.message || "Gemini API error");
   }
 
-  const text = data.candidates?.[0]?.content?.parts?.map(p => p.text).join("") || "";
+  const text =
+    data.candidates?.[0]?.content?.parts?.map((p) => p.text).join("") || "";
   if (!text) throw new Error("לא התקבלה תשובה מהשרת");
 
   return text;
