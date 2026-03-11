@@ -1,9 +1,8 @@
 const GEMINI_KEY = import.meta.env.VITE_GEMINI_KEY || "";
 
-// משתמשים ב-v1beta כדי לתמוך ב-system_instruction
-
+// גרסה v1 היציבה ביותר
 const GEMINI_API =
-  "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent";
+  "https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent";
 
 export function aiEnabled() {
   return GEMINI_KEY.length > 5;
@@ -14,13 +13,26 @@ export async function callAI(systemPrompt, messages, signal) {
     throw new Error("מפתח Gemini לא מוגדר. הוסף VITE_GEMINI_KEY לקובץ .env");
   }
 
-  // הגדרת זהות עוזר הוראה כברירת מחדל
+  // הגדרת הזהות של יורי
   const finalPrompt =
     systemPrompt ||
-    "אתה יורי, עוזר הוראה מקצועי. סייע למורים בארגון חומרים פדגוגיים, בניית מערכי שיעור ומענה על שאלות הוראה.";
+    "אתה יורי, עוזר הוראה מקצועי. סייע למורים בארגון חומרים פדגוגיים ומענה על שאלות הוראה.";
 
-  // המרת הודעות לפורמט של Gemini (כולל תמיכה בקבצים שקלוד בנה)
   const contents = [];
+
+  // הזרקת ההנחיות כהודעה הראשונה בשיחה (במקום system_instruction)
+  contents.push({
+    role: "user",
+    parts: [{ text: `הנחיות מערכת (בצע אותן באדיבות): ${finalPrompt}` }],
+  });
+  contents.push({
+    role: "model",
+    parts: [
+      { text: "הבנתי. אני יורי, עוזר ההוראה שלך. כיצד אוכל לסייע היום?" },
+    ],
+  });
+
+  // הוספת שאר ההודעות מהשיחה
   for (const m of messages) {
     const role = m.role === "assistant" ? "model" : "user";
     let parts;
@@ -43,7 +55,6 @@ export async function callAI(systemPrompt, messages, signal) {
     } else {
       parts = [{ text: String(m.content) }];
     }
-
     contents.push({ role, parts });
   }
 
@@ -52,8 +63,7 @@ export async function callAI(systemPrompt, messages, signal) {
     signal,
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      system_instruction: { parts: [{ text: finalPrompt }] },
-      contents,
+      contents, // שים לב: הורדנו את ה-system_instruction כדי למנוע שגיאות JSON
       generationConfig: {
         maxOutputTokens: 8192,
         temperature: 0.7,
