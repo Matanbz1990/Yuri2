@@ -1,6 +1,7 @@
 const GEMINI_KEY = import.meta.env.VITE_GEMINI_KEY || "";
+
 const GEMINI_API =
-  "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent";
+  "https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent";
 export function aiEnabled() {
   return GEMINI_KEY.length > 5;
 }
